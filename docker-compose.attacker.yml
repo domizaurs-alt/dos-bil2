@@ -1,0 +1,53 @@
+name: ddos-bil-attacker
+
+services:
+  traffic-spreader:
+    build:
+      context: ./attacker/traffic-spreader
+    image: ddos-bil-traffic-spreader:local
+    environment:
+      TARGET_BASE_URL: ${TRAFFIC_SPREADER__TARGET_BASE_URL:-http://host.docker.internal:8080}
+      REQUEST_TIMEOUT_SECONDS: ${TRAFFIC_SPREADER__REQUEST_TIMEOUT_SECONDS:-30}
+      SOURCE_IP_MODE: ${TRAFFIC_SPREADER__SOURCE_IP_MODE:-simulated_header}
+      SIMULATED_IP_HEADER: ${TRAFFIC_SPREADER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
+      SIMULATED_SOURCE_IPS: "${TRAFFIC_SPREADER__SIMULATED_SOURCE_IPS:-10.10.0.1,10.10.0.2,10.10.0.3,10.10.0.4}"
+      SIMULATED_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__SIMULATED_SOURCE_IP_WEIGHTS:-{"10.10.0.1":90,"10.10.0.2":4,"10.10.0.3":3,"10.10.0.4":3}}'
+      REAL_SOURCE_IPS: "${TRAFFIC_SPREADER__REAL_SOURCE_IPS:-}"
+      REAL_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS:-{}}'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/spreader_healthcheck', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ddos-bil-attacker-net
+
+  attacker:
+    build:
+      context: ./attacker
+    image: ddos-bil-attacker:local
+    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "30", "--print-stats"]
+    ports:
+      - "8089:8089"
+    environment:
+      OBSERVER_ENABLED: ${OBSERVER__ENABLED:-true}
+      OBSERVER_TARGET_URL: ${OBSERVER__TARGET_URL:-http://host.docker.internal:8080/quick_response}
+      OBSERVER_INTERVAL_SECONDS: ${OBSERVER__INTERVAL_SECONDS:-1}
+      OBSERVER_TIMEOUT_SECONDS: ${OBSERVER__TIMEOUT_SECONDS:-2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./attacker/config:/app/config:ro
+      - ./attacker/results:/app/results
+    depends_on:
+      traffic-spreader:
+        condition: service_healthy
+    networks:
+      - ddos-bil-attacker-net
+
+networks:
+  ddos-bil-attacker-net:
+    name: ddos-bil-attacker-net

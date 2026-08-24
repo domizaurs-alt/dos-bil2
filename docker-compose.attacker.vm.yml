@@ -1,0 +1,43 @@
+name: ddos-bil-attacker-vm
+
+services:
+  traffic-spreader:
+    build:
+      context: ./attacker/traffic-spreader
+    image: ddos-bil-traffic-spreader:local
+    network_mode: host
+    environment:
+      TARGET_BASE_URL: ${TRAFFIC_SPREADER__TARGET_BASE_URL}
+      REQUEST_TIMEOUT_SECONDS: ${TRAFFIC_SPREADER__REQUEST_TIMEOUT_SECONDS:-60}
+      SOURCE_IP_MODE: ${TRAFFIC_SPREADER__SOURCE_IP_MODE:-real_bind}
+      SIMULATED_IP_HEADER: ${TRAFFIC_SPREADER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
+      SIMULATED_SOURCE_IPS: "${TRAFFIC_SPREADER__SIMULATED_SOURCE_IPS:-}"
+      SIMULATED_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__SIMULATED_SOURCE_IP_WEIGHTS:-{}}'
+      REAL_SOURCE_IPS: "${TRAFFIC_SPREADER__REAL_SOURCE_IPS:-}"
+      REAL_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS:-{}}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/spreader_healthcheck', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  attacker:
+    build:
+      context: ./attacker
+    image: ddos-bil-attacker:local
+    network_mode: host
+    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "30", "--print-stats"]
+    extra_hosts:
+      - "traffic-spreader:127.0.0.1"
+    environment:
+      OBSERVER_ENABLED: ${OBSERVER__ENABLED:-true}
+      OBSERVER_TARGET_URL: ${OBSERVER__TARGET_URL}
+      OBSERVER_INTERVAL_SECONDS: ${OBSERVER__INTERVAL_SECONDS:-1}
+      OBSERVER_TIMEOUT_SECONDS: ${OBSERVER__TIMEOUT_SECONDS:-2}
+    volumes:
+      - ./attacker/config:/app/config:ro
+      - ./attacker/results:/app/results
+    depends_on:
+      traffic-spreader:
+        condition: service_healthy

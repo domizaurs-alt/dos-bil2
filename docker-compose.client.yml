@@ -1,0 +1,55 @@
+name: ddos-bil-client
+
+services:
+  test-client-app:
+    build:
+      context: ./test-client/app
+    image: ddos-bil-test-client:local
+    restart: unless-stopped
+    cpus: "${APP__CPUS:-0.50}"
+    mem_limit: ${APP__MEMORY_LIMIT:-256m}
+    memswap_limit: ${APP__MEMORY_SWAP_LIMIT:-256m}
+    environment:
+      LONG_RESPONSE_DELAY_MS: ${APP__LONG_RESPONSE_DELAY_MS:-3000}
+      LONG_RESPONSE_MEMORY_MB: ${APP__LONG_RESPONSE_MEMORY_MB:-16}
+      DOWNLOAD_FILE_SIZE_KB: ${APP__DOWNLOAD_FILE_SIZE_KB:-256}
+      DOWNLOAD_CHUNK_KB: ${APP__DOWNLOAD_CHUNK_KB:-64}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthcheck', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ddos-bil-client-net
+
+  reverse-proxy:
+    build:
+      context: ./test-client/reverse-proxy
+    image: ddos-bil-reverse-proxy:local
+    environment:
+      TARGET_BASE_URL: ${PROXY__TARGET_BASE_URL:-http://test-client-app:8000}
+      DDOS_PROTECTION_ENABLED: ${PROXY__DDOS_PROTECTION_ENABLED:-true}
+      TRUST_SIMULATED_IP: ${PROXY__TRUST_SIMULATED_IP:-true}
+      TRUST_FORWARDED_FOR: ${PROXY__TRUST_FORWARDED_FOR:-false}
+      RATE_LIMIT_REQUESTS: ${PROXY__RATE_LIMIT_REQUESTS:-20}
+      RATE_LIMIT_WINDOW_SECONDS: ${PROXY__RATE_LIMIT_WINDOW_SECONDS:-1}
+      BLOCK_DURATION_SECONDS: ${PROXY__BLOCK_DURATION_SECONDS:-30}
+      REQUEST_TIMEOUT_SECONDS: ${PROXY__REQUEST_TIMEOUT_SECONDS:-30}
+    ports:
+      - "8080:8080"
+    depends_on:
+      test-client-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/proxy_healthcheck', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ddos-bil-client-net
+
+networks:
+  ddos-bil-client-net:
+    name: ddos-bil-client-net

@@ -1,0 +1,19 @@
+{
+  "target_url": "http://traffic-spreader:8090",
+  "spreader_metrics_url": "http://traffic-spreader:8090/spreader_metrics",
+  "allow_non_local_target": false,
+  "fire_and_forget": true,
+  "users": 170,
+  "spawn_rate": 1,
+  "run_time": "240s",
+  "wait_time_min_seconds": 0.0,
+  "wait_time_max_seconds": 0.0,
+  "quick_response_weight": 10,
+  "long_response_weight": 90,
+  "download_file_weight": 0,
+  "healthcheck_weight": 1,
+  "fire_and_forget_rps_per_user": 0.2,
+  "fire_and_forget_connect_timeout_seconds": 1.0,
+  "fire_and_forget_send_timeout_seconds": 1.0,
+  "results_dir": "results"
+}
