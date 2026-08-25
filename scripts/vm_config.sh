@@ -68,10 +68,17 @@ import json
 import sys
 
 data = json.load(sys.stdin)
+interfaces = data if isinstance(data, list) else data.get("interface", [])
 ips = []
-for interface in data.get("interface", []):
+for interface in interfaces:
+    if not isinstance(interface, dict):
+        continue
     ipv4 = interface.get("ipv4", {})
+    if not isinstance(ipv4, dict):
+        continue
     for item in ipv4.get("ipAddress", []):
+        if not isinstance(item, dict):
+            continue
         ip = item.get("privateIpAddress")
         if ip and ip not in ips:
             ips.append(ip)
