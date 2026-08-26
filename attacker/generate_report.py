@@ -155,7 +155,8 @@ def error_label(error: str) -> str:
         return "n/a"
     lowered = error.lower()
     if "HTTP " in error:
-        return error.split("HTTP ", 1)[1].split("'", 1)[0].split(")", 1)[0]
+        code = error.split("HTTP ", 1)[1].split("'", 1)[0].split(")", 1)[0]
+        return status_label(code)
     labels = {
         "HTTPError": "HTTP error",
         "URLError": "Connection error",
@@ -174,10 +175,40 @@ def status_label(status: str) -> str:
     labels = {
         "0": "No response",
         "sent_without_response": "Sent without response wait",
+        "200": "HTTP 200 OK",
+        "201": "HTTP 201 Created",
+        "202": "HTTP 202 Accepted",
+        "204": "HTTP 204 No Content",
+        "301": "HTTP 301 Moved Permanently",
+        "302": "HTTP 302 Found",
+        "304": "HTTP 304 Not Modified",
+        "400": "HTTP 400 Bad Request",
+        "401": "HTTP 401 Unauthorized",
+        "403": "HTTP 403 Forbidden",
+        "404": "HTTP 404 Not Found",
+        "408": "HTTP 408 Request Timeout",
+        "429": "HTTP 429 Too Many Requests",
+        "500": "HTTP 500 Internal Server Error",
+        "502": "HTTP 502 Bad Gateway",
+        "503": "HTTP 503 Service Unavailable",
+        "504": "HTTP 504 Gateway Timeout",
     }
     if status.startswith("fire_and_forget_error:"):
         return error_label(status.split(":", 1)[1])
     return labels.get(status, status)
+
+
+def status_code_from_label(label: str) -> int | None:
+    parts = label.split()
+    for part in parts:
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def is_error_outcome(label: str) -> bool:
+    code = status_code_from_label(label)
+    return (code is not None and code >= 400) or "timeout" in label.lower() or label == "No response"
 
 
 def response_outcome_counts(scenario: dict) -> dict[str, int]:
@@ -349,6 +380,37 @@ def observer_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def read_text_file(path: Path, max_lines: int = 80) -> list[str]:
+    if not path.exists():
+        return []
+
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[:max_lines]
+    except OSError:
+        return []
+
+
+def execution_log_rows(scenario_path: Path, exceptions: list[dict[str, str]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in exceptions:
+        message = row.get("Message") or row.get("Traceback") or "Exception recorded"
+        rows.append(
+            {
+                "source": "Locust exception",
+                "count": row.get("Count") or "1",
+                "message": message.replace("\n", " ").strip(),
+            }
+        )
+
+    for name in ("run.log", "attack.log", "locust.log", "stderr.log", "stdout.log"):
+        for line in read_text_file(scenario_path / name):
+            cleaned = line.strip()
+            if cleaned:
+                rows.append({"source": name, "count": "", "message": cleaned})
+
+    return rows[:80]
+
+
 def test_date_from_history(history: list[dict[str, str]]) -> str | None:
     for row in history:
         timestamp = parse_epoch(row.get("Timestamp", ""))
@@ -394,13 +456,9 @@ def variant_count_label(count: int) -> str:
 
 
 def scope_html(scenario_count: int) -> str:
-    if scenario_count >= 2:
-        first_sentence = "The test is performed in two variants executed one after another. The first variant applies send-only pressure to validate traffic generation and source distribution while availability is tracked independently. The second variant waits for responses, allowing request failures and response-time percentiles to be measured directly."
-    else:
-        first_sentence = "This report contains the available scenario dataset. The runner is configured so the next execution will produce two consecutive variants: send-only pressure followed by measured response."
     return (
-        f"<p>{escape(first_sentence)}</p>"
-        "<p>The report presents traffic volume, response behavior, service availability observations, source distribution, protection events, and a side-by-side comparison where multiple variants are available. Findings and conclusions are intentionally left as placeholders so they can be completed after the next run is reviewed.</p>"
+        "<p>The assessment focused on the observable behavior of the service during the simulation, including traffic generation, service availability, HTTP response behavior, error conditions, workload distribution and the point at which service degradation became visible.</p>"
+        "<p>The results are intended to identify resilience gaps within the tested scenario and to provide recommendations for further investigation, remediation and subsequent validation.</p>"
     )
 
 
@@ -451,6 +509,7 @@ def load_scenario(scenario_path: Path, manifest_entry: dict) -> dict:
     stats = read_csv(scenario_path / "locust_stats.csv")
     history_csv = read_csv(scenario_path / "locust_stats_history.csv")
     failures = read_csv(scenario_path / "locust_failures.csv")
+    exceptions = read_csv(scenario_path / "locust_exceptions.csv")
     source_ips = read_json(scenario_path / "source_ips.json")
     config = read_json(scenario_path / "config.json")
     observer = observer_rows(read_csv(scenario_path / "observer.csv"))
@@ -486,6 +545,7 @@ def load_scenario(scenario_path: Path, manifest_entry: dict) -> dict:
         "aggregate": aggregate,
         "endpoints": endpoints,
         "failures": failures,
+        "executionLogRows": execution_log_rows(scenario_path, exceptions),
         "sourceIps": source_ips,
         "sourceRows": scenario_sources,
         "statusCounts": status_counts,
@@ -511,7 +571,7 @@ def combined_summary(scenarios: list[dict]) -> dict[str, object]:
     error_statuses = {
         status: count
         for status, count in service_counts.items()
-        if (status and status[0].isdigit() and int(status) >= 400) or "timeout" in status.lower() or status == "No response"
+        if is_error_outcome(status)
     }
     dominant_error = max(error_statuses.items(), key=lambda item: item[1], default=("n/a", 0))
     availability_values = [scenario["observerSummary"]["availability"] for scenario in scenarios if scenario["observerSummary"].get("availability") is not None]
@@ -622,6 +682,10 @@ def scenario_tables_html(scenario: dict) -> str:
     status_rows_html = [[status_label(str(status)), format_metric(count)] for status, count in scenario["statusCounts"].items()]
     response_outcome_rows_html = [[status, format_metric(count)] for status, count in response_outcome_counts(scenario).items()]
     delivery_error_rows_html = [[error_label(str(error)), format_metric(count)] for error, count in scenario["deliveryErrors"].items()]
+    execution_log_rows_html = [
+        [row["source"], row["count"], row["message"]]
+        for row in scenario["executionLogRows"]
+    ]
     config_rows_html = scenario_config_rows(scenario["config"], scenario["sendOnly"])
     issue_empty_message = f"No {scenario['issueBasis'].lower()} recorded."
 
@@ -634,6 +698,7 @@ def scenario_tables_html(scenario: dict) -> str:
                 f'<article class="panel"><h3>Delivery Result Summary</h3>{table_html(["Result", "Count"], response_outcome_rows_html, "No delivery result data recorded.")}</article>',
                 f'<article class="panel"><h3>Delivery Errors</h3>{table_html(["Error", "Count"], delivery_error_rows_html, "No delivery errors recorded.")}</article>',
                 f'<article class="panel full"><h3>Availability Observer</h3>{table_html(["Metric", "Value"], observer_table_rows(scenario["observerSummary"]))}</article>',
+                f'<article class="panel full"><h3>Execution Log</h3>{table_html(["Source", "Count", "Message"], execution_log_rows_html, "No execution log entries or Locust exceptions recorded.")}</article>',
                 f'<article class="panel full"><h3>Scenario Configuration</h3>{table_html(["Parameter", "Value"], config_rows_html)}</article>',
             ]
         )
@@ -646,6 +711,7 @@ def scenario_tables_html(scenario: dict) -> str:
             f'<article class="panel"><h3>Response Results</h3>{table_html(["Result", "Count"], response_outcome_rows_html, "No response result data recorded.")}</article>',
             f'<article class="panel"><h3>Delivery Errors</h3>{table_html(["Error", "Count"], delivery_error_rows_html, "No delivery errors recorded.")}</article>',
             f'<article class="panel full"><h3>Availability Observer</h3>{table_html(["Metric", "Value"], observer_table_rows(scenario["observerSummary"]))}</article>',
+            f'<article class="panel full"><h3>Execution Log</h3>{table_html(["Source", "Count", "Message"], execution_log_rows_html, "No execution log entries or Locust exceptions recorded.")}</article>',
             f'<article class="panel full"><h3>Scenario Configuration</h3>{table_html(["Parameter", "Value"], config_rows_html)}</article>',
         ]
     )
@@ -656,7 +722,7 @@ def scenario_html(scenario: dict) -> str:
     mode_note = (
         "This variant records transmission behavior and service availability independently. It is useful for pressure generation, while application health is interpreted from the observer and service response data."
         if send_only
-        else "This variant waits for application responses, so throughput, failures, and response-time percentiles can be interpreted as end-to-end request behavior."
+        else "This variant waits for application responses, so throughput, failures and response-time percentiles can be interpreted as end-to-end request behavior."
     )
     observer = scenario["observerSummary"]
     cards = "".join(
@@ -679,13 +745,13 @@ def scenario_html(scenario: dict) -> str:
         <article class="panel full"><h3>Send Duration Percentiles</h3><p class="chart-note">Shows how long it took to transmit requests from the sender side. These are transmission timings, not application response times.</p><div id="latency-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel full"><h3>Availability Observer</h3><p class="chart-note">Shows independent availability probes against {TARGET_LABEL}. State 1 means available, state 0 means unavailable; the yellow line shows probe latency.</p><div id="observer-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel"><h3>Send Volume by Scenario</h3><p class="chart-note">Shows which workload paths generated the transmission pressure during the send-only variant.</p><div id="volume-{escape(safe_id)}" class="chart"></div></article>
-        <article class="panel"><h3>Delivery Result Summary</h3><p class="chart-note">Shows transmission results and delivery-path errors observed outside the sender. HTTP status-code analysis is intentionally not used for this send-only variant.</p><div id="service-status-{escape(safe_id)}" class="chart"></div></article>
+        <article class="panel"><h3>Delivery Result Summary</h3><p class="chart-note">Shows transmission results and delivery-path errors observed outside the sender. HTTP status-code analysis is not used for this send-only variant.</p><div id="service-status-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel"><h3>Source Distribution</h3><p class="chart-note">Shows whether traffic source distribution followed the configured source weights.</p><div id="sources-{escape(safe_id)}" class="chart"></div></article>
         """
     else:
         panels = f"""
         <article class="panel full"><h3>Request Rate and Failed Responses</h3><p class="chart-note">Shows request throughput and failed responses per second during the measured-response variant.</p><div id="traffic-{escape(safe_id)}" class="chart"></div></article>
-        <article class="panel full"><h3>Response Time Percentiles</h3><p class="chart-note">Shows P50, average, P95, and P99 end-to-end response times because this variant waits for application responses.</p><div id="latency-{escape(safe_id)}" class="chart"></div></article>
+        <article class="panel full"><h3>Response Time Percentiles</h3><p class="chart-note">Shows P50, average, P95 and P99 end-to-end response times because this variant waits for application responses.</p><div id="latency-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel full"><h3>Availability Observer</h3><p class="chart-note">Shows independent availability probes against {TARGET_LABEL}. State 1 means available, state 0 means unavailable; the yellow line shows probe latency.</p><div id="observer-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel"><h3>Request Volume by Scenario</h3><p class="chart-note">Shows request volume and failed responses by workload path.</p><div id="volume-{escape(safe_id)}" class="chart"></div></article>
         <article class="panel"><h3>Response Results</h3><p class="chart-note">Shows response outcomes recorded while waiting for application responses, including missing responses and delivery errors where applicable.</p><div id="service-status-{escape(safe_id)}" class="chart"></div></article>
@@ -718,7 +784,7 @@ def overview_cards_html(summary: dict[str, object], scenario_count: int) -> str:
             metric_card("Total issues", format_metric(summary["totalIssues"]), "Send errors or failed responses"),
             metric_card("Lowest availability", format_percent(summary["lowestAvailability"]), "Availability observer"),
             metric_card("Dominant service error", str(dominant_status), f"{format_metric(dominant_count)} occurrences"),
-            metric_card("Traffic sources", format_metric(summary["sourceCount"]), "Anonymized source labels"),
+            metric_card("Traffic sources", format_metric(summary["sourceCount"]), "Source labels"),
         ]
     )
 
@@ -818,9 +884,8 @@ def generate_html_report(results_path: Path, manifest: dict, scenarios: list[dic
   <main>
     <section class="hero">
       <div>
-        <div class="eyebrow">Controlled DDoS resilience assessment</div>
         <h1>DDoS Resilience Assessment Report</h1>
-        <p>This client-facing report summarizes an approved, controlled application-layer DDoS simulation against an anonymized target. The assessment is split into two consecutive variants so transmission pressure and response behavior can be interpreted separately.</p>
+        <p>This report summarizes the application-layer DDoS simulation results. Traffic pressure and response behavior are shown separately to make the findings easier to review.</p>
       </div>
       <aside class="summary">
         __LOGO_HTML__
@@ -834,7 +899,7 @@ def generate_html_report(results_path: Path, manifest: dict, scenarios: list[dic
     </section>
 
     <section class="section-block">
-      <h2>Assessment Scenario and Scope</h2>
+      <h2>Assessment Objectives and Scope:</h2>
       __SCOPE_HTML__
     </section>
 
@@ -842,7 +907,7 @@ def generate_html_report(results_path: Path, manifest: dict, scenarios: list[dic
 
     <section class="section-block">
       <h2>Variant Comparison</h2>
-      <p>The comparison intentionally uses common metrics only: total traffic events, issue counts, observer availability, and outcome categories. Detailed charts differ by scenario because send-only pressure and measured-response execution answer different questions.</p>
+      <p>The comparison uses shared metrics only: total traffic events, issue counts, observer availability and outcome categories. Detailed charts differ by scenario because send-only pressure and measured-response execution answer different questions.</p>
       <div class="comparison-grid">
         <article class="panel"><h3>Traffic Events and Issues</h3><p class="chart-note">Compares total generated events with scenario-specific issues: send errors for send-only pressure and failed responses for measured response.</p><div id="comparison-events" class="chart"></div></article>
         <article class="panel"><h3>Observed Availability</h3><p class="chart-note">Compares independent observer availability for each variant. This is the common user-facing availability signal across both execution modes.</p><div id="comparison-availability" class="chart"></div></article>
@@ -852,24 +917,7 @@ def generate_html_report(results_path: Path, manifest: dict, scenarios: list[dic
 
     __SCENARIO_SECTIONS__
 
-    <section class="section-block placeholder">
-      <h2>Findings Placeholder</h2>
-      <ul>
-        <li>F-01: [To be completed after reviewing the next two-variant run.]</li>
-        <li>F-02: [To be completed after correlating availability, response codes, and source distribution.]</li>
-        <li>F-03: [To be completed after validating whether protection events match expectations.]</li>
-      </ul>
-    </section>
-
-    <section class="section-block placeholder">
-      <h2>Conclusions Placeholder</h2>
-      <ul>
-        <li>[Overall assessment conclusion to be completed after client review.]</li>
-        <li>[Recommended next steps to be completed after the final evidence review.]</li>
-      </ul>
-    </section>
-
-    <p class="footer">Prepared from the approved DDoS assessment dataset. Target identity and implementation details are intentionally omitted.</p>
+    <p class="footer">Prepared from the DDoS assessment dataset.</p>
   </main>
 
   <script>
@@ -907,7 +955,8 @@ def generate_html_report(results_path: Path, manifest: dict, scenarios: list[dic
 
     function serviceColors(labels) {
       return labels.map(label => {
-        const value = Number(label);
+        const match = String(label).match(/\b(\d{3})\b/);
+        const value = match ? Number(match[1]) : Number(label);
         if (value >= 500) return '#fb7185';
         if (value >= 400) return '#fbbf24';
         if (value >= 200 && value < 400) return '#34d399';
@@ -1035,6 +1084,14 @@ def markdown_scenario(scenario: dict) -> list[str]:
     lines.extend(["| Metric | Value |", "| --- | --- |"])
     for key, row_value in observer_table_rows(scenario["observerSummary"]):
         lines.append(f"| {key} | {row_value} |")
+    lines.extend(["", "### Execution Log", ""])
+    if scenario["executionLogRows"]:
+        lines.extend(["| Source | Count | Message |", "| --- | ---: | --- |"])
+        for row in scenario["executionLogRows"]:
+            message = str(row["message"]).replace("|", "\\|")
+            lines.append(f"| {row['source']} | {row['count']} | {message} |")
+    else:
+        lines.append("No execution log entries or Locust exceptions recorded.")
     lines.extend(["", "### Scenario Configuration", ""])
     lines.extend(["| Parameter | Value |", "| --- | --- |"])
     for key, row_value in scenario_config_rows(scenario["config"], scenario["sendOnly"]):
@@ -1054,9 +1111,11 @@ def generate_markdown_report(results_path: Path, manifest: dict, scenarios: list
         "- Assessment: Application-layer DDoS simulation",
         f"- Variants: {variant_count_label(len(scenarios))}",
         "",
-        "## Assessment Scenario and Scope",
+        "## Assessment Objectives and Scope:",
         "",
-        "The test is configured as two variants executed one after another: send-only pressure followed by measured response. The report presents traffic volume, response behavior, service availability observations, source distribution, protection events, and comparison across variants where multiple datasets are available.",
+        "The assessment focused on the observable behavior of the service during the simulation, including traffic generation, service availability, HTTP response behavior, error conditions, workload distribution and the point at which service degradation became visible.",
+        "",
+        "The results are intended to identify resilience gaps within the tested scenario and to provide recommendations for further investigation, remediation and subsequent validation.",
         "",
         "## Combined Summary",
         "",
@@ -1070,20 +1129,6 @@ def generate_markdown_report(results_path: Path, manifest: dict, scenarios: list
     for scenario in scenarios:
         lines.extend(markdown_scenario(scenario))
         lines.append("")
-    lines.extend(
-        [
-            "## Findings Placeholder",
-            "",
-            "- F-01: [To be completed after reviewing the next two-variant run.]",
-            "- F-02: [To be completed after correlating availability, response codes, and source distribution.]",
-            "- F-03: [To be completed after validating whether protection events match expectations.]",
-            "",
-            "## Conclusions Placeholder",
-            "",
-            "- [Overall assessment conclusion to be completed after client review.]",
-            "- [Recommended next steps to be completed after the final evidence review.]",
-        ]
-    )
     report_path = report_output_path(results_path, "report.md")
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path
