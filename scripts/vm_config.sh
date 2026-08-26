@@ -121,27 +121,33 @@ import sys
 ips = [ip for ip in sys.argv[1].split(",") if ip]
 print(json.dumps({ip: 1 for ip in ips}, separators=(",", ":")))
 ' "$PRIVATE_IPS")
+OBSERVER_SOURCE_IP="${IP_ARRAY[0]}"
 
 printf '\nAdd or keep these values in attacker/config/attacker.env:\n\n'
 printf 'TRAFFIC_SPREADER__SOURCE_IP_MODE=real_bind\n'
+printf 'TRAFFIC_SPREADER__RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER=true\n'
 printf 'TRAFFIC_SPREADER__REAL_SOURCE_IPS=%s\n' "$PRIVATE_IPS"
 printf 'TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS=%s\n' "$WEIGHTS_JSON"
+printf 'OBSERVER__SOURCE_IP=%s\n' "$OBSERVER_SOURCE_IP"
 
 if [[ -n "$ENV_FILE" ]]; then
   if [[ "$DRY_RUN" == "true" ]]; then
     printf '\nDry-run: not writing %s\n' "$ENV_FILE"
   else
-    python3 - "$ENV_FILE" "$PRIVATE_IPS" "$WEIGHTS_JSON" <<'PY'
+    python3 - "$ENV_FILE" "$PRIVATE_IPS" "$WEIGHTS_JSON" "$OBSERVER_SOURCE_IP" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 source_ips = sys.argv[2]
 weights = sys.argv[3]
+observer_source_ip = sys.argv[4]
 updates = {
     "TRAFFIC_SPREADER__SOURCE_IP_MODE": "real_bind",
+    "TRAFFIC_SPREADER__RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER": "true",
     "TRAFFIC_SPREADER__REAL_SOURCE_IPS": source_ips,
     "TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS": weights,
+    "OBSERVER__SOURCE_IP": observer_source_ip,
 }
 
 lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []

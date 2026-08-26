@@ -9,13 +9,18 @@ services:
       TARGET_BASE_URL: ${TRAFFIC_SPREADER__TARGET_BASE_URL:-http://host.docker.internal:8080}
       REQUEST_TIMEOUT_SECONDS: ${TRAFFIC_SPREADER__REQUEST_TIMEOUT_SECONDS:-30}
       SOURCE_IP_MODE: ${TRAFFIC_SPREADER__SOURCE_IP_MODE:-simulated_header}
+      RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER: ${TRAFFIC_SPREADER__RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER:-true}
       SIMULATED_IP_HEADER: ${TRAFFIC_SPREADER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
       SIMULATED_SOURCE_IPS: "${TRAFFIC_SPREADER__SIMULATED_SOURCE_IPS:-10.10.0.1,10.10.0.2,10.10.0.3,10.10.0.4}"
-      SIMULATED_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__SIMULATED_SOURCE_IP_WEIGHTS:-{"10.10.0.1":90,"10.10.0.2":4,"10.10.0.3":3,"10.10.0.4":3}}'
+      SIMULATED_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__SIMULATED_SOURCE_IP_WEIGHTS:-{"10.10.0.1":0,"10.10.0.2":90,"10.10.0.3":5,"10.10.0.4":5}}'
       REAL_SOURCE_IPS: "${TRAFFIC_SPREADER__REAL_SOURCE_IPS:-}"
       REAL_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS:-{}}'
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/spreader_healthcheck', timeout=2)"]
       interval: 10s
@@ -29,7 +34,7 @@ services:
     build:
       context: ./attacker
     image: ddos-bil-attacker:local
-    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "30", "--print-stats"]
+    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "2", "--print-stats"]
     ports:
       - "8089:8089"
     environment:
@@ -37,6 +42,9 @@ services:
       OBSERVER_TARGET_URL: ${OBSERVER__TARGET_URL:-http://host.docker.internal:8080/quick_response}
       OBSERVER_INTERVAL_SECONDS: ${OBSERVER__INTERVAL_SECONDS:-1}
       OBSERVER_TIMEOUT_SECONDS: ${OBSERVER__TIMEOUT_SECONDS:-2}
+      OBSERVER_REQUIRE_BASELINE: ${OBSERVER__REQUIRE_BASELINE:-true}
+      OBSERVER_SIMULATED_SOURCE_IP: ${OBSERVER__SIMULATED_SOURCE_IP:-10.10.0.1}
+      OBSERVER_SIMULATED_IP_HEADER: ${OBSERVER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

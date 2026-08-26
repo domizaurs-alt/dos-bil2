@@ -12,6 +12,7 @@ TARGET_BASE_URL = os.getenv("TARGET_BASE_URL", "http://127.0.0.1:8080").rstrip("
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30.0"))
 SIMULATED_IP_HEADER = os.getenv("SIMULATED_IP_HEADER", "X-Simulated-Source-IP")
 SOURCE_IP_MODE = os.getenv("SOURCE_IP_MODE", "simulated_header")
+RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER = os.getenv("RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER", "true").lower() == "true"
 SIMULATED_SOURCE_IPS = [
     value.strip() for value in os.getenv("SIMULATED_SOURCE_IPS", "").split(",") if value.strip()
 ]
@@ -26,8 +27,24 @@ def weighted_choices(ips: list[str], weights: dict[str, int]) -> list[str]:
     return [ip for ip in ips for _ in range(max(int(weights.get(ip, 1)), 0))]
 
 
-SIMULATED_SOURCE_IP_CHOICES = weighted_choices(SIMULATED_SOURCE_IPS, SIMULATED_SOURCE_IP_WEIGHTS)
-REAL_SOURCE_IP_CHOICES = weighted_choices(REAL_SOURCE_IPS, REAL_SOURCE_IP_WEIGHTS)
+def observer_source_ip(ips: list[str]) -> str | None:
+    if RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER and ips:
+        return ips[0]
+    return None
+
+
+def traffic_source_ips(ips: list[str]) -> list[str]:
+    if RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER and len(ips) > 1:
+        return ips[1:]
+    return ips
+
+
+SIMULATED_TRAFFIC_SOURCE_IPS = traffic_source_ips(SIMULATED_SOURCE_IPS)
+REAL_TRAFFIC_SOURCE_IPS = traffic_source_ips(REAL_SOURCE_IPS)
+SIMULATED_OBSERVER_SOURCE_IP = observer_source_ip(SIMULATED_SOURCE_IPS)
+REAL_OBSERVER_SOURCE_IP = observer_source_ip(REAL_SOURCE_IPS)
+SIMULATED_SOURCE_IP_CHOICES = weighted_choices(SIMULATED_TRAFFIC_SOURCE_IPS, SIMULATED_SOURCE_IP_WEIGHTS)
+REAL_SOURCE_IP_CHOICES = weighted_choices(REAL_TRAFFIC_SOURCE_IPS, REAL_SOURCE_IP_WEIGHTS)
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -41,7 +58,6 @@ HOP_BY_HOP_HEADERS = {
     "host",
 }
 
-app = FastAPI(title="Traffic Spreader", version="0.1.0")
 metrics = {
     "forwarded_requests": 0,
     "forward_errors": 0,
@@ -50,12 +66,14 @@ metrics = {
     "error_counts": Counter(),
 }
 
+app = FastAPI(title="Traffic Spreader", version="0.1.0")
+
 
 def configured_source_ips() -> list[str]:
     if SOURCE_IP_MODE == "real_bind":
-        return REAL_SOURCE_IPS
+        return REAL_TRAFFIC_SOURCE_IPS
     if SOURCE_IP_MODE == "simulated_header":
-        return SIMULATED_SOURCE_IPS
+        return SIMULATED_TRAFFIC_SOURCE_IPS
     return []
 
 
@@ -92,10 +110,13 @@ def filtered_headers(headers: httpx.Headers | dict[str, str]) -> dict[str, str]:
 
 
 def metrics_payload() -> dict[str, object]:
+    reserved_observer_ip = REAL_OBSERVER_SOURCE_IP if SOURCE_IP_MODE == "real_bind" else SIMULATED_OBSERVER_SOURCE_IP
     return {
         "target_base_url": TARGET_BASE_URL,
         "source_ip_mode": SOURCE_IP_MODE,
         "simulated_ip_header": SIMULATED_IP_HEADER,
+        "reserve_first_source_ip_for_observer": RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER,
+        "reserved_observer_source_ip": reserved_observer_ip,
         "configured_ips": configured_source_ips(),
         "configured_ip_weights": configured_source_ip_weights(),
         "forwarded_requests": metrics["forwarded_requests"],

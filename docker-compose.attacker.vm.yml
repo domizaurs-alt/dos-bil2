@@ -10,11 +10,16 @@ services:
       TARGET_BASE_URL: ${TRAFFIC_SPREADER__TARGET_BASE_URL}
       REQUEST_TIMEOUT_SECONDS: ${TRAFFIC_SPREADER__REQUEST_TIMEOUT_SECONDS:-60}
       SOURCE_IP_MODE: ${TRAFFIC_SPREADER__SOURCE_IP_MODE:-real_bind}
+      RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER: ${TRAFFIC_SPREADER__RESERVE_FIRST_SOURCE_IP_FOR_OBSERVER:-true}
       SIMULATED_IP_HEADER: ${TRAFFIC_SPREADER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
       SIMULATED_SOURCE_IPS: "${TRAFFIC_SPREADER__SIMULATED_SOURCE_IPS:-}"
       SIMULATED_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__SIMULATED_SOURCE_IP_WEIGHTS:-{}}'
       REAL_SOURCE_IPS: "${TRAFFIC_SPREADER__REAL_SOURCE_IPS:-}"
       REAL_SOURCE_IP_WEIGHTS: '${TRAFFIC_SPREADER__REAL_SOURCE_IP_WEIGHTS:-{}}'
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/spreader_healthcheck', timeout=2)"]
       interval: 10s
@@ -27,7 +32,7 @@ services:
       context: ./attacker
     image: ddos-bil-attacker:local
     network_mode: host
-    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "30", "--print-stats"]
+    command: ["python", "run_attack.py", "--config", "config/attack.json", "--web-ui", "--autostart", "--autoquit", "2", "--print-stats"]
     extra_hosts:
       - "traffic-spreader:127.0.0.1"
     environment:
@@ -35,6 +40,10 @@ services:
       OBSERVER_TARGET_URL: ${OBSERVER__TARGET_URL}
       OBSERVER_INTERVAL_SECONDS: ${OBSERVER__INTERVAL_SECONDS:-1}
       OBSERVER_TIMEOUT_SECONDS: ${OBSERVER__TIMEOUT_SECONDS:-2}
+      OBSERVER_REQUIRE_BASELINE: ${OBSERVER__REQUIRE_BASELINE:-true}
+      OBSERVER_SOURCE_IP: ${OBSERVER__SOURCE_IP:-}
+      OBSERVER_SIMULATED_SOURCE_IP: ${OBSERVER__SIMULATED_SOURCE_IP:-}
+      OBSERVER_SIMULATED_IP_HEADER: ${OBSERVER__SIMULATED_IP_HEADER:-X-Simulated-Source-IP}
     volumes:
       - ./attacker/config:/app/config:ro
       - ./attacker/results:/app/results

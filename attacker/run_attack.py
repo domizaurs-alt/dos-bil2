@@ -1,5 +1,6 @@
 import argparse
 import csv
+import http.client
 import json
 import os
 import shutil
@@ -34,6 +35,12 @@ def attack_mode(config: dict) -> str:
     return "fire_and_forget" if config.get("fire_and_forget", False) else "measured"
 
 
+def scenario_label(config: dict) -> str:
+    if config.get("label"):
+        return str(config["label"])
+    return "Send-only pressure" if config.get("fire_and_forget", False) else "Measured response"
+
+
 def is_local_or_private_target(url: str) -> bool:
     hostname = urlparse(url).hostname
     if not hostname:
@@ -62,6 +69,40 @@ def build_results_dir(results_root: Path) -> Path:
     return results_dir
 
 
+def scenario_slug(config: dict) -> str:
+    configured = str(config.get("id") or attack_mode(config))
+    slug = "".join(character if character.isalnum() else "_" for character in configured.lower()).strip("_")
+    return slug or attack_mode(config)
+
+
+def scenario_configs(config: dict) -> list[dict]:
+    base_config = {
+        key: value
+        for key, value in config.items()
+        if key not in {"scenarios", "between_scenario_pause_minutes", "between_scenario_pause_seconds"}
+    }
+    configured_scenarios = config.get("scenarios")
+    if isinstance(configured_scenarios, list) and configured_scenarios:
+        scenarios = [base_config | scenario for scenario in configured_scenarios if isinstance(scenario, dict)]
+        if scenarios:
+            return scenarios
+
+    return [
+        base_config | {"id": "fire_and_forget", "label": "Scenario 1: Send-only pressure", "fire_and_forget": True},
+        base_config | {"id": "measured_response", "label": "Scenario 2: Measured response", "fire_and_forget": False},
+    ]
+
+
+def write_manifest(path: Path, manifest: dict) -> None:
+    (path / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def scenario_pause_seconds(config: dict) -> float:
+    if "between_scenario_pause_minutes" in config:
+        return float(config.get("between_scenario_pause_minutes", 0) or 0) * 60
+    return float(config.get("between_scenario_pause_seconds", 0) or 0)
+
+
 def resolve_results_root(config: dict) -> Path:
     configured = Path(config.get("results_dir", "results"))
     if configured.is_absolute():
@@ -87,7 +128,66 @@ def observer_settings() -> dict[str, str | float | bool]:
         "target_url": os.getenv("OBSERVER_TARGET_URL", ""),
         "interval_seconds": float(os.getenv("OBSERVER_INTERVAL_SECONDS", "1.0")),
         "timeout_seconds": float(os.getenv("OBSERVER_TIMEOUT_SECONDS", "2.0")),
+        "source_ip": os.getenv("OBSERVER_SOURCE_IP", ""),
+        "simulated_source_ip": os.getenv("OBSERVER_SIMULATED_SOURCE_IP", ""),
+        "simulated_ip_header": os.getenv("OBSERVER_SIMULATED_IP_HEADER", "X-Simulated-Source-IP"),
     }
+
+
+def observer_request(target_url: str, timeout_seconds: float, user_agent: str) -> int:
+    settings = observer_settings()
+    parsed = urlparse(target_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("observer target must be an http or https URL")
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    headers = {"User-Agent": user_agent}
+    simulated_source_ip = str(settings["simulated_source_ip"])
+    if simulated_source_ip:
+        headers[str(settings["simulated_ip_header"])] = simulated_source_ip
+
+    source_ip = str(settings["source_ip"])
+    source_address = (source_ip, 0) if source_ip else None
+    connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_class(
+        parsed.hostname,
+        parsed.port,
+        timeout=timeout_seconds,
+        source_address=source_address,
+    )
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        response.read()
+        return response.status
+    finally:
+        connection.close()
+
+
+def observer_probe() -> tuple[bool, str, float]:
+    settings = observer_settings()
+    target_url = str(settings["target_url"])
+    timeout_seconds = float(settings["timeout_seconds"])
+    if not settings["enabled"] or not target_url:
+        return True, "observer disabled", 0.0
+
+    started = time.perf_counter()
+    try:
+        status = observer_request(target_url, timeout_seconds, "ddos-bil-observer-preflight/0.1")
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if 200 <= status < 400:
+            return True, f"HTTP {status}", elapsed_ms
+        return False, f"HTTP {status}", elapsed_ms
+    except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as exc:
+        detail = str(getattr(exc, "reason", exc))
+        return False, f"{type(exc).__name__}: {detail}", (time.perf_counter() - started) * 1000
+
+
+def require_observer_baseline() -> bool:
+    return bool_env("OBSERVER_REQUIRE_BASELINE", True)
 
 
 def observer_loop(results_dir: Path, stop_event: threading.Event) -> None:
@@ -102,25 +202,22 @@ def observer_loop(results_dir: Path, stop_event: threading.Event) -> None:
     with observer_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["timestamp", "target_url", "ok", "status_code", "response_time_ms", "error"],
+            fieldnames=["timestamp", "target_url", "ok", "status_code", "response_time_ms", "error", "error_detail"],
         )
         writer.writeheader()
         while not stop_event.is_set():
             started = time.perf_counter()
             status_code = ""
             error = ""
+            error_detail = ""
             ok = False
             try:
-                request = urllib.request.Request(target_url, headers={"User-Agent": "ddos-bil-observer/0.1"})
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                    status_code = str(response.status)
-                    response.read()
-                    ok = 200 <= response.status < 400
-            except urllib.error.HTTPError as exc:
-                status_code = str(exc.code)
+                status = observer_request(target_url, timeout_seconds, "ddos-bil-observer/0.1")
+                status_code = str(status)
+                ok = 200 <= status < 400
+            except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as exc:
                 error = type(exc).__name__
-            except (OSError, urllib.error.URLError) as exc:
-                error = type(exc).__name__
+                error_detail = str(getattr(exc, "reason", exc))
 
             writer.writerow(
                 {
@@ -130,6 +227,7 @@ def observer_loop(results_dir: Path, stop_event: threading.Event) -> None:
                     "status_code": status_code,
                     "response_time_ms": round((time.perf_counter() - started) * 1000, 3),
                     "error": error,
+                    "error_detail": error_detail,
                 }
             )
             file.flush()
@@ -279,7 +377,7 @@ def run_locust(config: dict, results_dir: Path, args: argparse.Namespace) -> int
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a local Locust load test.")
+    parser = argparse.ArgumentParser(description="Run controlled DDoS assessment scenarios.")
     parser.add_argument(
         "--config",
         default=str(BASE_DIR / "config" / "attack.json"),
@@ -310,20 +408,76 @@ def main() -> int:
     with (results_dir / "config.json").open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2)
 
-    spreader_metrics_url = config.get("spreader_metrics_url")
-    spreader_before = fetch_json(spreader_metrics_url)
-    observer_stop, observer_thread = start_observer(results_dir)
-    try:
-        return_code = run_locust(config, results_dir, args)
-    finally:
-        observer_stop.set()
-        if observer_thread:
-            observer_thread.join(timeout=5)
-    spreader_after = fetch_json(spreader_metrics_url)
-    try:
-        merge_spreader_metrics(results_dir, config, spreader_before, spreader_after)
-    except Exception as exc:
-        print(f"Warning: failed to merge traffic spreader metrics: {type(exc).__name__}: {exc}", file=sys.stderr)
+    scenarios = scenario_configs(config)
+    manifest = {
+        "report_date": "report_date",
+        "target_label": "Target site",
+        "preflight": {},
+        "scenarios": [],
+    }
+    preflight_ok, preflight_status, preflight_elapsed_ms = observer_probe()
+    manifest["preflight"] = {
+        "observer_baseline_ok": preflight_ok,
+        "status": preflight_status,
+        "response_time_ms": round(preflight_elapsed_ms, 3),
+    }
+    write_manifest(results_dir, manifest)
+    if not preflight_ok and require_observer_baseline():
+        print(
+            "Observer baseline check failed before scenario 1. "
+            f"Target site is not healthy from observer path: {preflight_status} "
+            f"after {preflight_elapsed_ms:.1f} ms. Start the client side first or set OBSERVER_REQUIRE_BASELINE=false.",
+            file=sys.stderr,
+        )
+        return 3
+
+    return_code = 0
+    for index, scenario_config in enumerate(scenarios, start=1):
+        scenario_dir_name = f"{index:02d}_{scenario_slug(scenario_config)}"
+        scenario_dir = results_dir / scenario_dir_name
+        scenario_dir.mkdir(parents=True, exist_ok=False)
+        scenario_config = scenario_config | {"scenario_order": index, "scenario_dir": scenario_dir_name}
+        with (scenario_dir / "config.json").open("w", encoding="utf-8") as file:
+            json.dump(scenario_config, file, indent=2)
+
+        scenario_entry = {
+            "order": index,
+            "id": scenario_slug(scenario_config),
+            "label": scenario_label(scenario_config),
+            "mode": attack_mode(scenario_config),
+            "directory": scenario_dir_name,
+            "status": "running",
+        }
+        manifest["scenarios"].append(scenario_entry)
+        write_manifest(results_dir, manifest)
+
+        print(f"Running scenario {index}/{len(scenarios)}: {scenario_entry['label']}")
+        spreader_metrics_url = scenario_config.get("spreader_metrics_url")
+        spreader_before = fetch_json(spreader_metrics_url)
+        observer_stop, observer_thread = start_observer(scenario_dir)
+        try:
+            scenario_return_code = run_locust(scenario_config, scenario_dir, args)
+        finally:
+            observer_stop.set()
+            if observer_thread:
+                observer_thread.join(timeout=5)
+        spreader_after = fetch_json(spreader_metrics_url)
+        try:
+            merge_spreader_metrics(scenario_dir, scenario_config, spreader_before, spreader_after)
+        except Exception as exc:
+            print(f"Warning: failed to merge traffic metrics: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+        scenario_entry["status"] = "completed" if scenario_return_code == 0 else "completed_with_errors"
+        scenario_entry["return_code"] = scenario_return_code
+        write_manifest(results_dir, manifest)
+        if scenario_return_code and not return_code:
+            return_code = scenario_return_code
+
+        pause_seconds = scenario_pause_seconds(config)
+        if pause_seconds > 0 and index < len(scenarios):
+            print(f"Waiting {pause_seconds / 60:.2f} minutes before next scenario")
+            time.sleep(pause_seconds)
+
     report_path = generate_report(results_dir)
     print(f"Results directory: {results_dir}")
     print(f"Report: {report_path}")

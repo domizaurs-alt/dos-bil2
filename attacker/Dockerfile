@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY locustfile.py run_attack.py generate_report.py ./
+COPY logo-website-file-globe-icon-svg-wikimedia-commons-21.png ./
 COPY config ./config
 RUN mkdir -p results
 

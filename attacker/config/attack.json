@@ -15,5 +15,18 @@
   "fire_and_forget_rps_per_user": 0.2,
   "fire_and_forget_connect_timeout_seconds": 1.0,
   "fire_and_forget_send_timeout_seconds": 1.0,
+  "between_scenario_pause_minutes": 1,
+  "scenarios": [
+    {
+      "id": "fire_and_forget",
+      "label": "Scenario 1: Send-only pressure",
+      "fire_and_forget": true
+    },
+    {
+      "id": "measured_response",
+      "label": "Scenario 2: Measured response",
+      "fire_and_forget": false
+    }
+  ],
   "results_dir": "results"
 }
